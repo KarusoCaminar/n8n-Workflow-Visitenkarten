@@ -1,0 +1,662 @@
+{
+  "name": "Visitenkarten OCR & CRM (Vertex AI)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "business-card",
+        "responseMode": "responseNode",
+        "options": {
+          "allowedOrigins": "*"
+        }
+      },
+      "id": "webhook-start",
+      "name": "Webhook Start",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300],
+      "webhookId": "business-card-webhook"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.body.imageUrl }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-input-type",
+      "name": "Check Input Type",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.body.imageUrl }}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "file"
+            }
+          }
+        }
+      },
+      "id": "fetch-image-url",
+      "name": "Fetch Image from URL",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [680, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Handle file upload from webhook\nconst binaryData = items[0].binary?.data;\n\nif (!binaryData) {\n  throw new Error('No image data found in upload');\n}\n\nreturn items.map(item => ({\n  json: {\n    source: 'upload',\n    mimeType: item.binary.data.mimeType || 'image/jpeg',\n    fileName: item.binary.data.fileName || 'business-card.jpg'\n  },\n  binary: item.binary\n}));"
+      },
+      "id": "prepare-upload",
+      "name": "Prepare Upload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [680, 400]
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combinationMode": "multiplex",
+        "options": {}
+      },
+      "id": "merge-image-paths",
+      "name": "Merge",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Convert image to base64 for Vertex AI\nconst binaryData = items[0].binary?.data;\n\nif (!binaryData || !binaryData.data) {\n  throw new Error('No binary image data available');\n}\n\n// Get base64 data (remove data URL prefix if present)\nlet base64Data = binaryData.data;\nif (typeof base64Data === 'string' && base64Data.includes('base64,')) {\n  base64Data = base64Data.split('base64,')[1];\n}\n\nconst mimeType = binaryData.mimeType || 'image/jpeg';\n\nreturn [{\n  json: {\n    base64Image: base64Data,\n    mimeType: mimeType,\n    fileName: items[0].json?.fileName || 'image.jpg'\n  },\n  binary: items[0].binary\n}];"
+      },
+      "id": "convert-to-base64",
+      "name": "Convert to Base64",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1120, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://{{ $credentials.region }}-aiplatform.googleapis.com/v1/projects/{{ $credentials.projectId }}/locations/{{ $credentials.region }}/publishers/google/models/gemini-2.0-flash-exp:generateContent",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"contents\": [\n    {\n      \"role\": \"user\",\n      \"parts\": [\n        {\n          \"text\": \"Analysiere diese Visitenkarte präzise und extrahiere alle Informationen. Gib das Ergebnis als strukturiertes JSON zurück mit folgenden Feldern: name (vollständiger Name der Person), company (Firmenname), title (Jobtitel/Position), email (E-Mail-Adresse), phone (Telefonnummer mit Ländercode), website (Webseite URL), address (vollständige Adresse), notes (zusätzliche Informationen oder Besonderheiten). Validiere auch: Ist die E-Mail-Adresse plausibel formatiert? Ist der Name vollständig (Vor- und Nachname)? Antworte NUR mit gültigem JSON, keine Markdown-Formatierung, keine Erklärungen.\"\n        },\n        {\n          \"inline_data\": {\n            \"mime_type\": \"{{ $json.mimeType }}\",\n            \"data\": \"{{ $json.base64Image }}\"\n          }\n        }\n      ]\n    }\n  ],\n  \"generationConfig\": {\n    \"temperature\": 0.1,\n    \"topK\": 32,\n    \"topP\": 1,\n    \"maxOutputTokens\": 2048,\n    \"responseMimeType\": \"application/json\"\n  }\n}",
+        "options": {}
+      },
+      "id": "call-vertex-ai",
+      "name": "Call Vertex AI (Gemini 2.5 Flash)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1340, 300],
+      "credentials": {
+        "googleApi": {
+          "id": "YOUR_VERTEX_AI_CREDENTIAL_ID",
+          "name": "Vertex AI Credentials"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse Vertex AI / Gemini response\nconst response = items[0].json;\n\nlet extracted = {\n  name: null,\n  company: null,\n  title: null,\n  email: null,\n  phone: null,\n  website: null,\n  address: null,\n  notes: null,\n  confidence: 0,\n  timestamp: new Date().toISOString()\n};\n\ntry {\n  // Vertex AI returns data in candidates[0].content.parts[0].text\n  let contentText = '';\n  \n  if (response.candidates && response.candidates[0]) {\n    const content = response.candidates[0].content;\n    if (content && content.parts && content.parts[0]) {\n      contentText = content.parts[0].text;\n    }\n  }\n  \n  if (!contentText) {\n    throw new Error('No content returned from Vertex AI');\n  }\n  \n  // Clean potential markdown formatting\n  contentText = contentText.replace(/```json\\n?/g, '').replace(/```\\n?/g, '').trim();\n  \n  // Parse JSON\n  const parsedData = JSON.parse(contentText);\n  \n  // Map and validate fields\n  extracted = {\n    name: parsedData.name || null,\n    company: parsedData.company || null,\n    title: parsedData.title || null,\n    email: parsedData.email || null,\n    phone: parsedData.phone || null,\n    website: parsedData.website || null,\n    address: parsedData.address || null,\n    notes: parsedData.notes || '',\n    confidence: parsedData.confidence || 0.85,\n    timestamp: new Date().toISOString()\n  };\n  \n  // Basic validation flags\n  extracted.has_email = !!extracted.email;\n  extracted.has_phone = !!extracted.phone;\n  extracted.has_company = !!extracted.company;\n  \n} catch (error) {\n  console.error('Parse error:', error.message);\n  extracted.notes = `Parsing fehlgeschlagen: ${error.message}`;\n  extracted.confidence = 0.2;\n  extracted.parse_error = true;\n}\n\nreturn [{ json: { extracted } }];"
+      },
+      "id": "parse-vertex-response",
+      "name": "Parse Vertex Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1560, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Plausibility checks\nconst data = items[0].json.extracted;\nconst issues = [];\nlet score = 100;\n\n// Email validation\nif (data.email) {\n  const emailRegex = /^[^\\s@]+@[^\\s@]+\\.[^\\s@]{2,}$/;\n  if (!emailRegex.test(data.email)) {\n    issues.push('❌ E-Mail-Format ungültig');\n    data.email_valid = false;\n    score -= 20;\n  } else {\n    data.email_valid = true;\n  }\n} else {\n  issues.push('⚠️ Keine E-Mail gefunden');\n  data.email_valid = false;\n  score -= 15;\n}\n\n// Name validation\nif (data.name) {\n  const nameParts = data.name.trim().split(/\\s+/);\n  if (nameParts.length < 2) {\n    issues.push('⚠️ Name eventuell unvollständig');\n    data.name_valid = false;\n    score -= 10;\n  } else {\n    data.name_valid = true;\n  }\n} else {\n  issues.push('❌ Kein Name gefunden');\n  data.name_valid = false;\n  score -= 25;\n}\n\n// Phone validation\nif (data.phone) {\n  const phoneRegex = /[\\d+\\-\\(\\)\\s]{7,}/;\n  data.phone_valid = phoneRegex.test(data.phone);\n  if (!data.phone_valid) {\n    issues.push('⚠️ Telefonnummer Format prüfen');\n    score -= 5;\n  }\n} else {\n  data.phone_valid = false;\n}\n\n// Website validation\nif (data.website) {\n  try {\n    // Add protocol if missing\n    if (!data.website.startsWith('http')) {\n      data.website = 'https://' + data.website;\n    }\n    new URL(data.website);\n    data.website_valid = true;\n  } catch {\n    issues.push('⚠️ Website URL Format prüfen');\n    data.website_valid = false;\n    score -= 5;\n  }\n} else {\n  data.website_valid = false;\n}\n\n// Company validation\nif (!data.company) {\n  issues.push('⚠️ Keine Firma gefunden');\n  score -= 10;\n}\n\n// Overall plausibility\ndata.plausibility_score = Math.max(0, score);\ndata.plausible = score >= 60;\ndata.issues = issues;\ndata.quality = score >= 80 ? '✅ Sehr gut' : score >= 60 ? '⚠️ OK' : '❌ Niedrig';\n\nreturn [{ json: { validated: data } }];"
+      },
+      "id": "plausibility-check",
+      "name": "Plausibility Check",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1780, 300]
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "id",
+          "__cached": true
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Contacts",
+          "mode": "name",
+          "cachedResultName": "Contacts"
+        },
+        "options": {
+          "returnAllMatches": true
+        }
+      },
+      "id": "lookup-sheets",
+      "name": "Lookup Existing Contacts",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [2000, 300],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "YOUR_GOOGLE_SHEETS_CREDENTIAL_ID",
+          "name": "Google Sheets OAuth2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Dedupe & Upsert Logic\nconst validated = items[0].json.validated;\nconst existingRows = items.slice(1).map(i => i.json);\n\nfunction normalize(s) {\n  if (!s) return '';\n  return s.toLowerCase()\n    .replace(/[^a-z0-9@.]/g, '')\n    .trim();\n}\n\nconst email = validated.email;\nconst name = normalize(validated.name);\nconst company = normalize(validated.company);\n\nlet foundRow = null;\nlet rowIndex = -1;\n\n// Search for duplicate\nfor (let i = 0; i < existingRows.length; i++) {\n  const row = existingRows[i];\n  \n  // Skip empty rows\n  if (!row.name && !row.email) continue;\n  \n  const rowEmail = row.email;\n  const rowName = normalize(row.name);\n  const rowCompany = normalize(row.company);\n  \n  // Match by email (strongest match)\n  if (email && rowEmail && normalize(email) === normalize(rowEmail)) {\n    foundRow = row;\n    rowIndex = i + 2; // +2 because: 1-indexed + header row\n    break;\n  }\n  \n  // Match by name + company (fallback)\n  if (name && company && rowName && rowCompany) {\n    const nameMatch = name === rowName;\n    const companyMatch = company === rowCompany;\n    \n    if (nameMatch && companyMatch) {\n      foundRow = row;\n      rowIndex = i + 2;\n      break;\n    }\n  }\n}\n\nconst timestamp = new Date().toISOString();\n\nif (foundRow) {\n  // UPDATE - merge non-empty values\n  const merged = {};\n  \n  for (const key of ['name', 'company', 'title', 'email', 'phone', 'website', 'address']) {\n    // Prefer new value if old is empty/missing\n    const oldVal = foundRow[key];\n    const newVal = validated[key];\n    \n    if (newVal && newVal !== '') {\n      merged[key] = newVal; // Always use new data if available\n    } else if (oldVal && oldVal !== '') {\n      merged[key] = oldVal; // Keep old if new is empty\n    } else {\n      merged[key] = '';\n    }\n  }\n  \n  // Merge notes\n  const oldNotes = foundRow.notes || '';\n  const newNotes = validated.notes || '';\n  merged.notes = oldNotes ? `${oldNotes}\\n---\\n${newNotes} (${timestamp})` : newNotes;\n  \n  merged.last_updated = timestamp;\n  merged.scan_count = (parseInt(foundRow.scan_count) || 0) + 1;\n  \n  return [{\n    json: {\n      action: 'update',\n      data: merged,\n      rowIndex: rowIndex,\n      message: `Kontakt aktualisiert (Scan #${merged.scan_count})`\n    }\n  }];\n  \n} else {\n  // CREATE new entry\n  const newRow = {\n    name: validated.name || '',\n    company: validated.company || '',\n    title: validated.title || '',\n    email: validated.email || '',\n    phone: validated.phone || '',\n    website: validated.website || '',\n    address: validated.address || '',\n    notes: validated.notes || '',\n    quality: validated.quality || '',\n    plausibility_score: validated.plausibility_score || 0,\n    created_at: timestamp,\n    last_updated: timestamp,\n    scan_count: 1\n  };\n  \n  return [{\n    json: {\n      action: 'create',\n      data: newRow,\n      message: 'Neuer Kontakt erstellt'\n    }\n  }];\n}"
+      },
+      "id": "dedupe-logic",
+      "name": "Dedupe & Merge",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2220, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.action }}",
+              "rightValue": "update",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-action",
+      "name": "Update or Create?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [2440, 300]
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Contacts",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "name": "={{ $json.data.name }}",
+            "company": "={{ $json.data.company }}",
+            "title": "={{ $json.data.title }}",
+            "email": "={{ $json.data.email }}",
+            "phone": "={{ $json.data.phone }}",
+            "website": "={{ $json.data.website }}",
+            "address": "={{ $json.data.address }}",
+            "notes": "={{ $json.data.notes }}",
+            "quality": "={{ $json.data.quality }}",
+            "plausibility_score": "={{ $json.data.plausibility_score }}",
+            "last_updated": "={{ $json.data.last_updated }}",
+            "scan_count": "={{ $json.data.scan_count }}"
+          },
+          "matchingColumns": [],
+          "schema": []
+        },
+        "options": {
+          "cellFormat": "USER_ENTERED",
+          "useAppend": false,
+          "dataLocationOnSheet": "={{ 'A' + $json.rowIndex }}"
+        }
+      },
+      "id": "update-sheet",
+      "name": "Update Row",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [2660, 200],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "YOUR_GOOGLE_SHEETS_CREDENTIAL_ID",
+          "name": "Google Sheets OAuth2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Contacts",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "name": "={{ $json.data.name }}",
+            "company": "={{ $json.data.company }}",
+            "title": "={{ $json.data.title }}",
+            "email": "={{ $json.data.email }}",
+            "phone": "={{ $json.data.phone }}",
+            "website": "={{ $json.data.website }}",
+            "address": "={{ $json.data.address }}",
+            "notes": "={{ $json.data.notes }}",
+            "quality": "={{ $json.data.quality }}",
+            "plausibility_score": "={{ $json.data.plausibility_score }}",
+            "created_at": "={{ $json.data.created_at }}",
+            "last_updated": "={{ $json.data.last_updated }}",
+            "scan_count": "={{ $json.data.scan_count }}"
+          },
+          "matchingColumns": [],
+          "schema": []
+        },
+        "options": {}
+      },
+      "id": "create-sheet",
+      "name": "Append New Row",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [2660, 400],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "YOUR_GOOGLE_SHEETS_CREDENTIAL_ID",
+          "name": "Google Sheets OAuth2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combinationMode": "multiplex",
+        "options": {}
+      },
+      "id": "merge-results",
+      "name": "Merge Results",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [2880, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build final response\nconst sheetResult = items[0].json;\nconst dedupeInfo = items[1]?.json || {};\n\nconst response = {\n  success: true,\n  action: dedupeInfo.action || 'unknown',\n  message: dedupeInfo.message || 'Erfolgreich verarbeitet',\n  data: dedupeInfo.data || sheetResult,\n  timestamp: new Date().toISOString(),\n  table_url: 'https://n8n2.kortex-system.de/webhook/view-contacts'\n};\n\nreturn [{ json: response }];"
+      },
+      "id": "build-response",
+      "name": "Build Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [3100, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json, null, 2) }}",
+        "options": {
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Access-Control-Allow-Origin",
+                "value": "*"
+              },
+              {
+                "name": "Content-Type",
+                "value": "application/json"
+              }
+            ]
+          }
+        }
+      },
+      "id": "respond-webhook",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [3320, 300]
+    },
+    {
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "view-contacts",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-view",
+      "name": "Webhook View Contacts",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 600],
+      "webhookId": "view-contacts-webhook"
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Contacts",
+          "mode": "name"
+        },
+        "options": {
+          "returnAllMatches": true
+        }
+      },
+      "id": "get-all-contacts",
+      "name": "Get All Contacts",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [460, 600],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "YOUR_GOOGLE_SHEETS_CREDENTIAL_ID",
+          "name": "Google Sheets OAuth2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Generate HTML table view\nconst contacts = items.map(i => i.json);\n\nconst html = `\n<!DOCTYPE html>\n<html lang=\"de\">\n<head>\n    <meta charset=\"UTF-8\">\n    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n    <title>Kontakte - CRM</title>\n    <style>\n        * { margin: 0; padding: 0; box-sizing: border-box; }\n        body {\n            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;\n            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);\n            padding: 20px;\n            min-height: 100vh;\n        }\n        .container {\n            max-width: 1400px;\n            margin: 0 auto;\n            background: white;\n            border-radius: 15px;\n            box-shadow: 0 20px 60px rgba(0,0,0,0.3);\n            padding: 30px;\n        }\n        h1 {\n            color: #333;\n            margin-bottom: 10px;\n            font-size: 2em;\n        }\n        .stats {\n            display: flex;\n            gap: 20px;\n            margin: 20px 0;\n        }\n        .stat-box {\n            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);\n            color: white;\n            padding: 15px 25px;\n            border-radius: 10px;\n            font-weight: bold;\n        }\n        .table-wrapper {\n            overflow-x: auto;\n        }\n        table {\n            width: 100%;\n            border-collapse: collapse;\n            margin-top: 20px;\n        }\n        th, td {\n            padding: 12px;\n            text-align: left;\n            border-bottom: 1px solid #e0e0e0;\n        }\n        th {\n            background: #667eea;\n            color: white;\n            font-weight: 600;\n            position: sticky;\n            top: 0;\n        }\n        tr:hover {\n            background: #f5f5f5;\n        }\n        .quality-badge {\n            display: inline-block;\n            padding: 4px 10px;\n            border-radius: 12px;\n            font-size: 0.85em;\n            font-weight: 600;\n        }\n        .quality-good { background: #4caf50; color: white; }\n        .quality-ok { background: #ff9800; color: white; }\n        .quality-low { background: #f44336; color: white; }\n        a { color: #667eea; text-decoration: none; }\n        a:hover { text-decoration: underline; }\n        .refresh-btn {\n            background: #667eea;\n            color: white;\n            border: none;\n            padding: 10px 20px;\n            border-radius: 8px;\n            cursor: pointer;\n            font-size: 1em;\n            margin: 10px 0;\n        }\n        .refresh-btn:hover { background: #764ba2; }\n    </style>\n</head>\n<body>\n    <div class=\"container\">\n        <h1>📇 Kontakte CRM</h1>\n        <p style=\"color: #666; margin-bottom: 15px;\">Automatisch erfasste Visitenkarten</p>\n        \n        <div class=\"stats\">\n            <div class=\"stat-box\">📊 Gesamt: ${contacts.length}</div>\n            <div class=\"stat-box\">📧 Mit E-Mail: ${contacts.filter(c => c.email).length}</div>\n            <div class=\"stat-box\">📱 Mit Telefon: ${contacts.filter(c => c.phone).length}</div>\n        </div>\n        \n        <button class=\"refresh-btn\" onclick=\"location.reload()\">🔄 Aktualisieren</button>\n        \n        <div class=\"table-wrapper\">\n            <table>\n                <thead>\n                    <tr>\n                        <th>#</th>\n                        <th>Name</th>\n                        <th>Firma</th>\n                        <th>Position</th>\n                        <th>E-Mail</th>\n                        <th>Telefon</th>\n                        <th>Website</th>\n                        <th>Qualität</th>\n                        <th>Scans</th>\n                        <th>Aktualisiert</th>\n                    </tr>\n                </thead>\n                <tbody>\n${contacts.map((c, idx) => `\n                    <tr>\n                        <td>${idx + 1}</td>\n                        <td><strong>${c.name || '-'}</strong></td>\n                        <td>${c.company || '-'}</td>\n                        <td>${c.title || '-'}</td>\n                        <td>${c.email ? `<a href=\"mailto:${c.email}\">${c.email}</a>` : '-'}</td>\n                        <td>${c.phone || '-'}</td>\n                        <td>${c.website ? `<a href=\"${c.website}\" target=\"_blank\">🔗 Link</a>` : '-'}</td>\n                        <td>${c.quality ? `<span class=\"quality-badge ${c.quality.includes('✅') ? 'quality-good' : c.quality.includes('⚠️') ? 'quality-ok' : 'quality-low'}\">${c.quality}</span>` : '-'}</td>\n                        <td>${c.scan_count || 1}</td>\n                        <td>${c.last_updated ? new Date(c.last_updated).toLocaleString('de-DE') : '-'}</td>\n                    </tr>\n`).join('')}\n                </tbody>\n            </table>\n        </div>\n        \n        <p style=\"margin-top: 20px; color: #999; font-size: 0.9em;\">⏱️ Generiert: ${new Date().toLocaleString('de-DE')}</p>\n    </div>\n</body>\n</html>\n`;\n\nreturn [{ json: { html } }];"
+      },
+      "id": "generate-html",
+      "name": "Generate HTML Table",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [680, 600]
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "={{ $json.html }}",
+        "options": {
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "text/html; charset=utf-8"
+              }
+            ]
+          }
+        }
+      },
+      "id": "respond-html",
+      "name": "Respond HTML",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [900, 600]
+    }
+  ],
+  "connections": {
+    "Webhook Start": {
+      "main": [
+        [
+          {
+            "node": "Check Input Type",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Input Type": {
+      "main": [
+        [
+          {
+            "node": "Fetch Image from URL",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Prepare Upload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Image from URL": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Upload": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge": {
+      "main": [
+        [
+          {
+            "node": "Convert to Base64",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Convert to Base64": {
+      "main": [
+        [
+          {
+            "node": "Call Vertex AI (Gemini 2.5 Flash)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call Vertex AI (Gemini 2.5 Flash)": {
+      "main": [
+        [
+          {
+            "node": "Parse Vertex Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Vertex Response": {
+      "main": [
+        [
+          {
+            "node": "Plausibility Check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Plausibility Check": {
+      "main": [
+        [
+          {
+            "node": "Lookup Existing Contacts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Lookup Existing Contacts": {
+      "main": [
+        [
+          {
+            "node": "Dedupe & Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Dedupe & Merge": {
+      "main": [
+        [
+          {
+            "node": "Update or Create?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update or Create?": {
+      "main": [
+        [
+          {
+            "node": "Update Row",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Append New Row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Row": {
+      "main": [
+        [
+          {
+            "node": "Merge Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Append New Row": {
+      "main": [
+        [
+          {
+            "node": "Merge Results",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge Results": {
+      "main": [
+        [
+          {
+            "node": "Build Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Response": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook View Contacts": {
+      "main": [
+        [
+          {
+            "node": "Get All Contacts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get All Contacts": {
+      "main": [
+        [
+          {
+            "node": "Generate HTML Table",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate HTML Table": {
+      "main": [
+        [
+          {
+            "node": "Respond HTML",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": [],
+  "triggerCount": 2,
+  "updatedAt": "2025-10-30T00:00:00.000Z",
+  "versionId": "1"
+}

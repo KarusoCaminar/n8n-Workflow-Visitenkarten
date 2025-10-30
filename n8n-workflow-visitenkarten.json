@@ -1,0 +1,478 @@
+{
+  "name": "Visitenkarten OCR & CRM Workflow",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "business-card",
+        "responseMode": "responseNode",
+        "options": {
+          "allowedOrigins": "*"
+        }
+      },
+      "id": "webhook-start",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [240, 300],
+      "webhookId": "business-card-webhook"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{Object.keys($json.body).includes('imageUrl')}}",
+              "operation": "equals",
+              "value2": "true"
+            }
+          ]
+        }
+      },
+      "id": "check-input-type",
+      "name": "Check Input Type",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "url": "={{$json.body.imageUrl}}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "file"
+            }
+          }
+        }
+      },
+      "id": "fetch-image-url",
+      "name": "Fetch Image URL",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [680, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Handle file upload from webhook\nconst binaryData = items[0].binary?.data;\nif (!binaryData) {\n  throw new Error('No image data found');\n}\n\nreturn items.map(item => ({\n  json: {\n    imageData: item.binary.data,\n    mimeType: item.binary.data.mimeType || 'image/jpeg',\n    fileName: item.binary.data.fileName || 'business-card.jpg'\n  },\n  binary: item.binary\n}));"
+      },
+      "id": "prepare-upload",
+      "name": "Prepare Upload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [680, 400]
+    },
+    {
+      "parameters": {},
+      "id": "merge-image-paths",
+      "name": "Merge Image Paths",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 2.1,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Convert image to base64 for Gemini\nconst binaryData = items[0].binary?.data;\n\nif (!binaryData || !binaryData.data) {\n  throw new Error('No binary image data available');\n}\n\n// Get base64 data (remove data URL prefix if present)\nlet base64Data = binaryData.data;\nif (base64Data.includes('base64,')) {\n  base64Data = base64Data.split('base64,')[1];\n}\n\nconst mimeType = binaryData.mimeType || 'image/jpeg';\n\nreturn [{\n  json: {\n    base64Image: base64Data,\n    mimeType: mimeType\n  }\n}];"
+      },
+      "id": "convert-to-base64",
+      "name": "Convert to Base64",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1120, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpQueryAuth",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "contents",
+              "value": "=[{\"parts\":[{\"text\":\"Analysiere diese Visitenkarte präzise. Extrahiere alle Informationen und gib sie als strukturiertes JSON zurück mit folgenden Feldern: name (vollständiger Name), company (Firmenname), title (Jobtitel/Position), email (E-Mail-Adresse), phone (Telefonnummer), website (Webseite URL), address (vollständige Adresse), notes (zusätzliche Notizen). Validiere auch: ist die E-Mail plausibel? Ist der Name vollständig? Antworte NUR mit gültigem JSON, keine Markdown-Formatierung.\"},{\"inline_data\":{\"mime_type\":\"{{$json.mimeType}}\",\"data\":\"={{$json.base64Image}}\"}}],\"role\":\"user\"}]"
+            },
+            {
+              "name": "generationConfig",
+              "value": "={\"temperature\":0.1,\"topK\":32,\"topP\":1,\"maxOutputTokens\":2048,\"response_mime_type\":\"application/json\"}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "call-gemini",
+      "name": "Call Gemini 2.5 Flash",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1340, 300],
+      "credentials": {
+        "httpQueryAuth": {
+          "id": "gemini-api-key",
+          "name": "Gemini API Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse Gemini response and extract business card data\nconst response = items[0].json;\n\nlet extracted = {\n  name: null,\n  company: null,\n  title: null,\n  email: null,\n  phone: null,\n  website: null,\n  address: null,\n  notes: null,\n  confidence: 0,\n  raw_response: JSON.stringify(response)\n};\n\ntry {\n  // Gemini 2.5 Flash returns data in candidates[0].content.parts[0].text\n  let contentText = '';\n  \n  if (response.candidates && response.candidates[0]) {\n    const content = response.candidates[0].content;\n    if (content && content.parts && content.parts[0]) {\n      contentText = content.parts[0].text;\n    }\n  }\n  \n  // Try to parse JSON from content\n  let parsedData = {};\n  \n  // Clean potential markdown formatting\n  contentText = contentText.replace(/```json\\n?/g, '').replace(/```\\n?/g, '').trim();\n  \n  if (contentText) {\n    parsedData = JSON.parse(contentText);\n  }\n  \n  // Map fields\n  extracted = {\n    name: parsedData.name || null,\n    company: parsedData.company || null,\n    title: parsedData.title || null,\n    email: parsedData.email || null,\n    phone: parsedData.phone || null,\n    website: parsedData.website || null,\n    address: parsedData.address || null,\n    notes: parsedData.notes || '',\n    confidence: parsedData.confidence || 0.8,\n    timestamp: new Date().toISOString()\n  };\n  \n} catch (error) {\n  extracted.notes = `Parse error: ${error.message}. Raw: ${JSON.stringify(response).substring(0, 200)}`;\n  extracted.confidence = 0.3;\n}\n\nreturn [{ json: { extracted } }];"
+      },
+      "id": "parse-gemini",
+      "name": "Parse Gemini Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1560, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Plausibility checks for extracted data\nconst data = items[0].json.extracted;\nconst issues = [];\n\n// Email validation\nif (data.email) {\n  const emailRegex = /^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/;\n  if (!emailRegex.test(data.email)) {\n    issues.push('Invalid email format');\n    data.email_valid = false;\n  } else {\n    data.email_valid = true;\n  }\n} else {\n  issues.push('No email found');\n  data.email_valid = false;\n}\n\n// Name validation (at least 2 parts)\nif (data.name) {\n  const nameParts = data.name.trim().split(/\\s+/);\n  if (nameParts.length < 2) {\n    issues.push('Name might be incomplete');\n    data.name_valid = false;\n  } else {\n    data.name_valid = true;\n  }\n} else {\n  issues.push('No name found');\n  data.name_valid = false;\n}\n\n// Phone validation (basic)\nif (data.phone) {\n  const phoneRegex = /[0-9+\\-\\(\\)\\s]{7,}/;\n  data.phone_valid = phoneRegex.test(data.phone);\n  if (!data.phone_valid) issues.push('Phone format suspicious');\n} else {\n  data.phone_valid = false;\n}\n\n// Website validation\nif (data.website) {\n  try {\n    new URL(data.website);\n    data.website_valid = true;\n  } catch {\n    // Try adding https://\n    if (!data.website.startsWith('http')) {\n      data.website = 'https://' + data.website;\n    }\n    data.website_valid = true;\n  }\n} else {\n  data.website_valid = false;\n}\n\n// Overall plausibility\ndata.plausible = issues.length <= 1;\ndata.issues = issues;\n\nreturn [{ json: { validated: data } }];"
+      },
+      "id": "plausibility-check",
+      "name": "Plausibility Check",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1780, 300]
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "sheetName": "Contacts",
+        "returnAll": true,
+        "options": {}
+      },
+      "id": "lookup-sheets",
+      "name": "Lookup in Sheets",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.2,
+      "position": [2000, 300],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "google-sheets-oauth",
+          "name": "Google Sheets OAuth2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Dedupe logic: check if contact exists by email or name+company\nconst validated = items[0].json.validated;\nconst existingRows = items.slice(1).map(i => i.json);\n\nfunction normalize(s) {\n  return (s || '').toLowerCase().replace(/[^a-z0-9]/g, '').trim();\n}\n\nconst email = validated.email;\nconst name = normalize(validated.name);\nconst company = normalize(validated.company);\n\nlet foundRow = null;\nlet rowIndex = -1;\n\n// Search for duplicate\nfor (let i = 0; i < existingRows.length; i++) {\n  const row = existingRows[i];\n  const rowEmail = row.email;\n  const rowName = normalize(row.name);\n  const rowCompany = normalize(row.company);\n  \n  // Match by email (primary)\n  if (email && rowEmail && email.toLowerCase() === rowEmail.toLowerCase()) {\n    foundRow = row;\n    rowIndex = i + 2; // +2 because sheets are 1-indexed and have header\n    break;\n  }\n  \n  // Match by name + company (secondary)\n  if (name && company && rowName && rowCompany) {\n    if (name === rowName && company === rowCompany) {\n      foundRow = row;\n      rowIndex = i + 2;\n      break;\n    }\n  }\n}\n\nif (foundRow) {\n  // UPDATE existing\n  const merged = {};\n  for (const key of ['name', 'company', 'title', 'email', 'phone', 'website', 'address', 'notes']) {\n    // Keep existing non-empty values, otherwise use new\n    merged[key] = (foundRow[key] && foundRow[key] !== '') ? foundRow[key] : (validated[key] || '');\n  }\n  merged.last_updated = new Date().toISOString();\n  merged.row_number = rowIndex;\n  \n  return [{\n    json: {\n      action: 'update',\n      data: merged,\n      rowIndex: rowIndex\n    }\n  }];\n} else {\n  // CREATE new\n  const newRow = {\n    name: validated.name || '',\n    company: validated.company || '',\n    title: validated.title || '',\n    email: validated.email || '',\n    phone: validated.phone || '',\n    website: validated.website || '',\n    address: validated.address || '',\n    notes: validated.notes || '',\n    created_at: new Date().toISOString(),\n    last_updated: new Date().toISOString()\n  };\n  \n  return [{\n    json: {\n      action: 'create',\n      data: newRow\n    }\n  }];\n}"
+      },
+      "id": "dedupe-logic",
+      "name": "Dedupe & Merge Logic",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2220, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{$json.action}}",
+              "operation": "equals",
+              "value2": "update"
+            }
+          ]
+        }
+      },
+      "id": "check-action",
+      "name": "Update or Create?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [2440, 300]
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_SPREADSHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": "Contacts",
+        "dataMode": "autoMapInputData",
+        "options": {
+          "range": "A={{$json.rowIndex}}"
+        }
+      },
+      "id": "update-sheet",
+      "name": "Update Sheet Row",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.2,
+      "position": [2660, 200],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "google-sheets-oauth",
+          "name": "Google Sheets OAuth2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_SPREADSHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": "Contacts",
+        "dataMode": "autoMapInputData",
+        "options": {}
+      },
+      "id": "create-sheet",
+      "name": "Create Sheet Row",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.2,
+      "position": [2660, 400],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "google-sheets-oauth",
+          "name": "Google Sheets OAuth2"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "id": "merge-results",
+      "name": "Merge Results",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 2.1,
+      "position": [2880, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build final response for frontend\nconst result = items[0].json;\nconst action = items[1]?.json?.action || 'unknown';\n\nconst response = {\n  success: true,\n  action: action, // 'update' or 'create'\n  data: result.data || result,\n  message: action === 'update' ? 'Contact updated successfully' : 'New contact created',\n  timestamp: new Date().toISOString()\n};\n\nreturn [{ json: response }];"
+      },
+      "id": "build-response",
+      "name": "Build Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [3100, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{$json}}",
+        "options": {
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Access-Control-Allow-Origin",
+                "value": "*"
+              },
+              {
+                "name": "Content-Type",
+                "value": "application/json"
+              }
+            ]
+          }
+        }
+      },
+      "id": "respond-webhook",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [3320, 300]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Check Input Type",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Input Type": {
+      "main": [
+        [
+          {
+            "node": "Fetch Image URL",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Prepare Upload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Image URL": {
+      "main": [
+        [
+          {
+            "node": "Merge Image Paths",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Upload": {
+      "main": [
+        [
+          {
+            "node": "Merge Image Paths",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge Image Paths": {
+      "main": [
+        [
+          {
+            "node": "Convert to Base64",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Convert to Base64": {
+      "main": [
+        [
+          {
+            "node": "Call Gemini 2.5 Flash",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call Gemini 2.5 Flash": {
+      "main": [
+        [
+          {
+            "node": "Parse Gemini Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Gemini Response": {
+      "main": [
+        [
+          {
+            "node": "Plausibility Check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Plausibility Check": {
+      "main": [
+        [
+          {
+            "node": "Lookup in Sheets",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Lookup in Sheets": {
+      "main": [
+        [
+          {
+            "node": "Dedupe & Merge Logic",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Dedupe & Merge Logic": {
+      "main": [
+        [
+          {
+            "node": "Update or Create?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update or Create?": {
+      "main": [
+        [
+          {
+            "node": "Update Sheet Row",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Create Sheet Row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Sheet Row": {
+      "main": [
+        [
+          {
+            "node": "Merge Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Sheet Row": {
+      "main": [
+        [
+          {
+            "node": "Merge Results",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge Results": {
+      "main": [
+        [
+          {
+            "node": "Build Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Response": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": [],
+  "triggerCount": 1,
+  "updatedAt": "2025-10-30T00:00:00.000Z",
+  "versionId": "1"
+}
